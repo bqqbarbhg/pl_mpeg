@@ -3649,8 +3649,6 @@ PLM_FORCEINLINE void plm_vint_store_transpose(int *dst, plm_vint a, plm_vint b, 
 
 #endif
 
-#if 1
-
 void plm_video_idct(int *block) {
 	plm_vint
 		b1, b3, b4, b6, b7, tmp1, tmp2, m0,
@@ -3731,78 +3729,6 @@ void plm_video_idct(int *block) {
 		plm_vint_store_transpose(block + 4 + i*8, t0, t1, t2, t3);
 	}
 }
-
-#else
-
-void plm_video_idct(int *block) {
-	int
-		b1, b3, b4, b6, b7, tmp1, tmp2, m0,
-		x0, x1, x2, x3, x4, y3, y4, y5, y6, y7;
-
-	int temp[64];
-
-	// Transform columns
-	for (int i = 0; i < 8; ++i) {
-		b1 = block[4 * 8 + i];
-		b3 = block[2 * 8 + i] + block[6 * 8 + i];
-		b4 = block[5 * 8 + i] - block[3 * 8 + i];
-		tmp1 = block[1 * 8 + i] + block[7 * 8 + i];
-		tmp2 = block[3 * 8 + i] + block[5 * 8 + i];
-		b6 = block[1 * 8 + i] - block[7 * 8 + i];
-		b7 = tmp1 + tmp2;
-		m0 = block[0 * 8 + i];
-		x4 = ((b6 * 473 - b4 * 196 + 128) >> 8) - b7;
-		x0 = x4 - (((tmp1 - tmp2) * 362 + 128) >> 8);
-		x1 = m0 - b1;
-		x2 = (((block[2 * 8 + i] - block[6 * 8 + i]) * 362 + 128) >> 8) - b3;
-		x3 = m0 + b1;
-		y3 = x1 + x2;
-		y4 = x3 + b3;
-		y5 = x1 - x2;
-		y6 = x3 - b3;
-		y7 = -x0 - ((b4 * 473 + b6 * 196 + 128) >> 8);
-		temp[i * 8 + 0] = b7 + y4;
-		temp[i * 8 + 1] = x4 + y3;
-		temp[i * 8 + 2] = y5 - x0;
-		temp[i * 8 + 3] = y6 - y7;
-		temp[i * 8 + 4] = y6 + y7;
-		temp[i * 8 + 5] = x0 + y5;
-		temp[i * 8 + 6] = y3 - x4;
-		temp[i * 8 + 7] = y4 - b7;
-	}
-
-	// Transform rows
-	for (int i = 0; i < 8; ++i) {
-		b1 = temp[4*8 + i];
-		b3 = temp[2*8 + i] + temp[6*8 + i];
-		b4 = temp[5*8 + i] - temp[3*8 + i];
-		tmp1 = temp[1*8 + i] + temp[7*8 + i];
-		tmp2 = temp[3*8 + i] + temp[5*8 + i];
-		b6 = temp[1*8 + i] - temp[7*8 + i];
-		b7 = tmp1 + tmp2;
-		m0 = temp[0*8 + i];
-		x4 = ((b6 * 473 - b4 * 196 + 128) >> 8) - b7;
-		x0 = x4 - (((tmp1 - tmp2) * 362 + 128) >> 8);
-		x1 = m0 - b1;
-		x2 = (((temp[2*8 + i] - temp[6*8 + i]) * 362 + 128) >> 8) - b3;
-		x3 = m0 + b1;
-		y3 = x1 + x2;
-		y4 = x3 + b3;
-		y5 = x1 - x2;
-		y6 = x3 - b3;
-		y7 = -x0 - ((b4 * 473 + b6 * 196 + 128) >> 8);
-		block[0 + i*8] = (b7 + y4 + 128) >> 8;
-		block[1 + i*8] = (x4 + y3 + 128) >> 8;
-		block[2 + i*8] = (y5 - x0 + 128) >> 8;
-		block[3 + i*8] = (y6 - y7 + 128) >> 8;
-		block[4 + i*8] = (y6 + y7 + 128) >> 8;
-		block[5 + i*8] = (x0 + y5 + 128) >> 8;
-		block[6 + i*8] = (y3 - x4 + 128) >> 8;
-		block[7 + i*8] = (y4 - b7 + 128) >> 8;
-	}
-}
-
-#endif
 
 // YCbCr conversion following the BT.601 standard:
 // https://infogalactic.com/info/YCbCr#ITU-R_BT.601_conversion

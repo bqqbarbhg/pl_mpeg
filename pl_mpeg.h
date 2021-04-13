@@ -812,14 +812,14 @@ plm_samples_t *plm_audio_decode(plm_audio_t *self);
 	#define PLM_FORCEINLINE __forceinline
 	#ifndef PLM_USE_SSE
 		#if (defined(_M_IX86_FP) && _M_IX86_FP >= 2) || defined(_M_X64)
-			#define PLM_USE_SSE
+			#define PLM_USE_SSE 1
 		#endif
 	#endif
 #elif defined(__GNUC__) || defined(__clang__)
 	#define PLM_FORCEINLINE __attribute__((always_inline))
 	#ifndef PLM_USE_SSE
 		#if defined(__SSE2__ ) || defined(__x86_64__)
-			#define PLM_USE_SSE
+			#define PLM_USE_SSE 1
 		#endif
 	#endif
 #else
@@ -827,7 +827,7 @@ plm_samples_t *plm_audio_decode(plm_audio_t *self);
 #endif
 #endif
 
-#if defined(PLM_USE_SSE)
+#if defined(PLM_USE_SSE) && PLM_USE_SSE
 	#include <xmmintrin.h>
 	#include <emmintrin.h>
 #endif
@@ -3297,7 +3297,7 @@ void plm_video_interpolate_macroblock(plm_video_t *self, int motion_h, int motio
 	plm_video_process_macroblock(self, s->cb.data, d->cb.data, motion_h / 2, motion_v / 2, 8, TRUE);
 }
 
-#if defined(PLM_USE_SSE)
+#if defined(PLM_USE_SSE) && PLM_USE_SSE
 
 #define plm_vec8_copy(dst, src) (*(int64_t*)(dst) = *(const int64_t*)(src))
 #define plm_vec8_avg2(dst, a, b) _mm_storel_epi64((__m128i*)(dst), _mm_avg_epu8(_mm_loadl_epi64((const __m128i*)(a)), _mm_loadl_epi64((const __m128i*)(b))))
@@ -3594,7 +3594,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 	}
 }
 
-#if defined(PLM_USE_SSE)
+#if defined(PLM_USE_SSE) && PLM_USE_SSE
 
 typedef __m128i plm_vint;
 #define plm_vint_width() 4

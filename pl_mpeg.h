@@ -830,8 +830,8 @@ plm_samples_t *plm_audio_decode(plm_audio_t *self);
 #if defined(PLM_USE_SSE)
 	#include <xmmintrin.h>
 	#include <emmintrin.h>
-	#include <smmintrin.h>
 #endif
+
 
 // -----------------------------------------------------------------------------
 // plm (high-level interface) implementation
@@ -1408,6 +1408,7 @@ void plm_buffer_load_file_callback(plm_buffer_t *self, void *user);
 
 int plm_buffer_has(plm_buffer_t *self, size_t count);
 int plm_buffer_read(plm_buffer_t *self, int count);
+int plm_buffer_read_bit(plm_buffer_t *self);
 void plm_buffer_align(plm_buffer_t *self);
 void plm_buffer_skip(plm_buffer_t *self, size_t count);
 int plm_buffer_skip_bytes(plm_buffer_t *self, uint8_t v);
@@ -1597,7 +1598,7 @@ int plm_buffer_has_ended(plm_buffer_t *self) {
 	return self->has_ended;
 }
 
-int plm_buffer_has(plm_buffer_t *self, size_t count) {
+int plm_buffer_has_slow(plm_buffer_t *self, size_t count) {
 	if (((self->length << 3) - self->bit_index) >= count) {
 		return TRUE;
 	}
@@ -1616,6 +1617,14 @@ int plm_buffer_has(plm_buffer_t *self, size_t count) {
 	return FALSE;
 }
 
+PLM_FORCEINLINE int plm_buffer_has(plm_buffer_t *self, size_t count) {
+	if (((self->length << 3) - self->bit_index) >= count) {
+		return TRUE;
+	}
+
+	return plm_buffer_has_slow(self, count);
+}
+
 int plm_buffer_read(plm_buffer_t *self, int count) {
 	if (!plm_buffer_has(self, count)) {
 		return 0;
@@ -1630,13 +1639,25 @@ int plm_buffer_read(plm_buffer_t *self, int count) {
 		int shift = remaining - read;
 		int mask = (0xff >> (8 - read));
 
-		value = (value << read) | ((current_byte & (mask << shift)) >> shift);
+		value = (value << read) | ((current_byte >> shift) & mask);
 
 		self->bit_index += read;
 		count -= read;
 	}
 
 	return value;
+}
+
+PLM_FORCEINLINE int plm_buffer_read_bit(plm_buffer_t *self) {
+	if (!plm_buffer_has(self, 1)) {
+		return 0;
+	}
+
+	int current_byte = self->bytes[self->bit_index >> 3];
+	int shift = 7 - (self->bit_index & 7);
+	self->bit_index += 1;
+
+	return (current_byte >> shift) & 1;
 }
 
 void plm_buffer_align(plm_buffer_t *self) {
@@ -1716,7 +1737,7 @@ int plm_buffer_no_start_code(plm_buffer_t *self) {
 int16_t plm_buffer_read_vlc_slow(plm_buffer_t *self, const plm_vlc_t *table) {
 	plm_vlc_t state = {0, 0};
 	do {
-		state = table[state.index + plm_buffer_read(self, 1)];
+		state = table[state.index + plm_buffer_read_bit(self)];
 	} while (state.index > 0);
 	return state.value;
 }
@@ -2921,7 +2942,7 @@ int plm_video_decode_sequence_header(plm_video_t *self) {
 	plm_buffer_skip(self->buffer, 18 + 1 + 10 + 1);
 
 	// Load custom intra quant matrix?
-	if (plm_buffer_read(self->buffer, 1)) { 
+	if (plm_buffer_read_bit(self->buffer)) { 
 		for (int i = 0; i < 64; i++) {
 			int idx = PLM_VIDEO_ZIG_ZAG[i];
 			self->intra_quant_matrix[idx] = plm_buffer_read(self->buffer, 8);
@@ -2932,7 +2953,7 @@ int plm_video_decode_sequence_header(plm_video_t *self) {
 	}
 
 	// Load custom non intra quant matrix?
-	if (plm_buffer_read(self->buffer, 1)) { 
+	if (plm_buffer_read_bit(self->buffer)) { 
 		for (int i = 0; i < 64; i++) {
 			int idx = PLM_VIDEO_ZIG_ZAG[i];
 			self->non_intra_quant_matrix[idx] = plm_buffer_read(self->buffer, 8);
@@ -3001,7 +3022,7 @@ void plm_video_decode_picture(plm_video_t *self) {
 		self->picture_type == PLM_VIDEO_PICTURE_TYPE_PREDICTIVE ||
 		self->picture_type == PLM_VIDEO_PICTURE_TYPE_B
 	) {
-		self->motion_forward.full_px = plm_buffer_read(self->buffer, 1);
+		self->motion_forward.full_px = plm_buffer_read_bit(self->buffer);
 		int f_code = plm_buffer_read(self->buffer, 3);
 		if (f_code == 0) {
 			// Ignore picture with zero f_code
@@ -3012,7 +3033,7 @@ void plm_video_decode_picture(plm_video_t *self) {
 
 	// Backward full_px, f_code
 	if (self->picture_type == PLM_VIDEO_PICTURE_TYPE_B) {
-		self->motion_backward.full_px = plm_buffer_read(self->buffer, 1);
+		self->motion_backward.full_px = plm_buffer_read_bit(self->buffer);
 		int f_code = plm_buffer_read(self->buffer, 3);
 		if (f_code == 0) {
 			// Ignore picture with zero f_code
@@ -3467,7 +3488,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		int run = 0;
 		uint16_t coeff = (uint16_t)plm_buffer_read_vlc(self->buffer, &self->luts.video_dct_coeff);
 
-		if ((coeff == 0x0001) && (n > 0) && (plm_buffer_read(self->buffer, 1) == 0)) {
+		if ((coeff == 0x0001) && (n > 0) && (plm_buffer_read_bit(self->buffer) == 0)) {
 			// end_of_block
 			break;
 		}
@@ -3488,7 +3509,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		else {
 			run = coeff >> 8;
 			level = coeff & 0xff;
-			if (plm_buffer_read(self->buffer, 1)) {
+			if (plm_buffer_read_bit(self->buffer)) {
 				level = -level;
 			}
 		}
@@ -3573,17 +3594,18 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 	}
 }
 
-#if defined(PLM_USE_SSE) && 0
+#if defined(PLM_USE_SSE)
 
-typedef __m128i plm_int4;
+typedef __m128i plm_vint;
+#define plm_vint_width() 4
 
-#define plm_int4_load(ptr) _mm_load_si128((const __m128i*)(ptr))
-#define plm_int4_add(a, b) _mm_add_epi32((a), (b))
-#define plm_int4_addi(a, b) _mm_add_epi32((a), _mm_set1_epi32(b))
-#define plm_int4_sub(a, b) _mm_sub_epi32((a), (b))
-#define plm_int4_div64(a) _mm_srai_epi32(_mm_add_epi32((a), _mm_set1_epi32(128)), 8)
+#define plm_vint_load(ptr) _mm_load_si128((const __m128i*)(ptr))
+#define plm_vint_add(a, b) _mm_add_epi32((a), (b))
+#define plm_vint_addi(a, b) _mm_add_epi32((a), _mm_set1_epi32(b))
+#define plm_vint_sub(a, b) _mm_sub_epi32((a), (b))
+#define plm_vint_div256(a) _mm_srai_epi32(_mm_add_epi32((a), _mm_set1_epi32(128)), 8)
 
-PLM_FORCEINLINE plm_int4 plm_int4_muli(plm_int4 a, int b)
+PLM_FORCEINLINE plm_vint plm_vint_muli(plm_vint a, int b)
 {
 	__m128i bs = _mm_set1_epi32(b);
 	__m128i lo = _mm_mul_epu32(a, bs);
@@ -3593,7 +3615,7 @@ PLM_FORCEINLINE plm_int4 plm_int4_muli(plm_int4 a, int b)
 		_mm_shuffle_epi32(hi, _MM_SHUFFLE(3,2,2,0)));
 }
 
-PLM_FORCEINLINE void plm_int4_store_transpose(int *dst, plm_int4 a, plm_int4 b, plm_int4 c, plm_int4 d)
+PLM_FORCEINLINE void plm_vint_store_transpose(int *dst, plm_vint a, plm_vint b, plm_vint c, plm_vint d)
 {
 	__m128i t0 = _mm_unpacklo_epi32(a, b);
 	__m128i t1 = _mm_unpacklo_epi32(c, d);
@@ -3607,60 +3629,22 @@ PLM_FORCEINLINE void plm_int4_store_transpose(int *dst, plm_int4 a, plm_int4 b, 
 
 #else
 
-typedef struct {
-	int v[4];
-} plm_int4;
+typedef int plm_vint;
+#define plm_vint_width() 1
 
-PLM_FORCEINLINE plm_int4 plm_int4_load(const void *src)
-{
-	plm_int4 r;
-	memcpy(&r, src, sizeof(plm_int4));
-	return r;
-}
+#define plm_vint_load(src) *(int*)(src)
+#define plm_vint_add(a, b) ((a) + (b))
+#define plm_vint_addi(a, b) ((a) + (b))
+#define plm_vint_sub(a, b) ((a) - (b))
+#define plm_vint_muli(a, b) ((a) * (b))
+#define plm_vint_div256(a) (((a) + 128) >> 8)
 
-PLM_FORCEINLINE plm_int4 plm_int4_add(plm_int4 a, plm_int4 b)
+PLM_FORCEINLINE void plm_vint_store_transpose(int *dst, plm_vint a, plm_vint b, plm_vint c, plm_vint d)
 {
-	plm_int4 r;
-	for (int i = 0; i < 4; i++) r.v[i] = a.v[i] + b.v[i];
-	return r;
-}
-
-PLM_FORCEINLINE plm_int4 plm_int4_addi(plm_int4 a, int b)
-{
-	plm_int4 r;
-	for (int i = 0; i < 4; i++) r.v[i] = a.v[i] + b;
-	return r;
-}
-
-PLM_FORCEINLINE plm_int4 plm_int4_sub(plm_int4 a, plm_int4 b)
-{
-	plm_int4 r;
-	for (int i = 0; i < 4; i++) r.v[i] = a.v[i] - b.v[i];
-	return r;
-}
-
-PLM_FORCEINLINE plm_int4 plm_int4_muli(plm_int4 a, int b)
-{
-	plm_int4 r;
-	for (int i = 0; i < 4; i++) r.v[i] = a.v[i] * b;
-	return r;
-}
-
-PLM_FORCEINLINE plm_int4 plm_int4_div64(plm_int4 a)
-{
-	plm_int4 r;
-	for (int i = 0; i < 4; i++) r.v[i] = (a.v[i] + 128) >> 8;
-	return r;
-}
-
-PLM_FORCEINLINE void plm_int4_store_transpose(int *dst, plm_int4 a, plm_int4 b, plm_int4 c, plm_int4 d)
-{
-	for (int i = 0; i < 4; i++) {
-		dst[0 + 8*i] = a.v[i];
-		dst[1 + 8*i] = b.v[i];
-		dst[2 + 8*i] = c.v[i];
-		dst[3 + 8*i] = d.v[i];
-	}
+	dst[0] = a;
+	dst[1] = b;
+	dst[2] = c;
+	dst[3] = d;
 }
 
 #endif
@@ -3668,81 +3652,83 @@ PLM_FORCEINLINE void plm_int4_store_transpose(int *dst, plm_int4 a, plm_int4 b, 
 #if 1
 
 void plm_video_idct(int *block) {
-	plm_int4
+	plm_vint
 		b1, b3, b4, b6, b7, tmp1, tmp2, m0,
 		x0, x1, x2, x3, x4, y3, y4, y5, y6, y7;
 
-	plm_int4
+	plm_vint
 		t0, t1, t2, t3;
 
 	int temp[64];
 
+	int width = plm_vint_width();
+
 	// Transform columns
-	for (int i = 0; i < 8; i += 4) {
-		b1 = plm_int4_load(block + 4 * 8 + i);
-		b3 = plm_int4_add(plm_int4_load(block + 2 * 8 + i), plm_int4_load(block + 6 * 8 + i));
-		b4 = plm_int4_sub(plm_int4_load(block + 5 * 8 + i), plm_int4_load(block + 3 * 8 + i));
-		tmp1 = plm_int4_add(plm_int4_load(block + 1 * 8 + i), plm_int4_load(block + 7 * 8 + i));
-		tmp2 = plm_int4_add(plm_int4_load(block + 3 * 8 + i), plm_int4_load(block + 5 * 8 + i));
-		b6 = plm_int4_sub(plm_int4_load(block + 1 * 8 + i), plm_int4_load(block + 7 * 8 + i));
-		b7 = plm_int4_add(tmp1, tmp2);
-		m0 = plm_int4_load(block + 0 * 8 + i);
-		x4 = plm_int4_sub(plm_int4_div64(plm_int4_sub(plm_int4_muli(b6, 473), plm_int4_muli(b4, 196))), b7);
-		x0 = plm_int4_sub(x4, plm_int4_div64(plm_int4_muli(plm_int4_sub(tmp1, tmp2), 362)));
-		x1 = plm_int4_sub(m0, b1);
-		x2 = plm_int4_sub(plm_int4_div64(plm_int4_muli(plm_int4_sub(plm_int4_load(block + 2 * 8 + i), plm_int4_load(block + 6 * 8 + i)), 362)), b3);
-		x3 = plm_int4_add(m0, b1);
-		y3 = plm_int4_add(x1, x2);
-		y4 = plm_int4_add(x3, b3);
-		y5 = plm_int4_sub(x1, x2);
-		y6 = plm_int4_sub(x3, b3);
-		y7 = plm_int4_add(x0, plm_int4_div64(plm_int4_add(plm_int4_muli(b4, 473), plm_int4_muli(b6, 196))));
+	for (int i = 0; i < 8; i += width) {
+		b1 = plm_vint_load(block + 4 * 8 + i);
+		b3 = plm_vint_add(plm_vint_load(block + 2 * 8 + i), plm_vint_load(block + 6 * 8 + i));
+		b4 = plm_vint_sub(plm_vint_load(block + 5 * 8 + i), plm_vint_load(block + 3 * 8 + i));
+		tmp1 = plm_vint_add(plm_vint_load(block + 1 * 8 + i), plm_vint_load(block + 7 * 8 + i));
+		tmp2 = plm_vint_add(plm_vint_load(block + 3 * 8 + i), plm_vint_load(block + 5 * 8 + i));
+		b6 = plm_vint_sub(plm_vint_load(block + 1 * 8 + i), plm_vint_load(block + 7 * 8 + i));
+		b7 = plm_vint_add(tmp1, tmp2);
+		m0 = plm_vint_load(block + 0 * 8 + i);
+		x4 = plm_vint_sub(plm_vint_div256(plm_vint_sub(plm_vint_muli(b6, 473), plm_vint_muli(b4, 196))), b7);
+		x0 = plm_vint_sub(x4, plm_vint_div256(plm_vint_muli(plm_vint_sub(tmp1, tmp2), 362)));
+		x1 = plm_vint_sub(m0, b1);
+		x2 = plm_vint_sub(plm_vint_div256(plm_vint_muli(plm_vint_sub(plm_vint_load(block + 2 * 8 + i), plm_vint_load(block + 6 * 8 + i)), 362)), b3);
+		x3 = plm_vint_add(m0, b1);
+		y3 = plm_vint_add(x1, x2);
+		y4 = plm_vint_add(x3, b3);
+		y5 = plm_vint_sub(x1, x2);
+		y6 = plm_vint_sub(x3, b3);
+		y7 = plm_vint_add(x0, plm_vint_div256(plm_vint_add(plm_vint_muli(b4, 473), plm_vint_muli(b6, 196))));
 
-		t0 = plm_int4_add(b7, y4);
-		t1 = plm_int4_add(x4, y3);
-		t2 = plm_int4_sub(y5, x0);
-		t3 = plm_int4_add(y6, y7);
-		plm_int4_store_transpose(temp + 0 + i*8, t0, t1, t2, t3);
+		t0 = plm_vint_add(b7, y4);
+		t1 = plm_vint_add(x4, y3);
+		t2 = plm_vint_sub(y5, x0);
+		t3 = plm_vint_add(y6, y7);
+		plm_vint_store_transpose(temp + 0 + i*8, t0, t1, t2, t3);
 
-		t0 = plm_int4_sub(y6, y7);
-		t1 = plm_int4_add(x0, y5);
-		t2 = plm_int4_sub(y3, x4);
-		t3 = plm_int4_sub(y4, b7);
-		plm_int4_store_transpose(temp + 4 + i*8, t0, t1, t2, t3);
+		t0 = plm_vint_sub(y6, y7);
+		t1 = plm_vint_add(x0, y5);
+		t2 = plm_vint_sub(y3, x4);
+		t3 = plm_vint_sub(y4, b7);
+		plm_vint_store_transpose(temp + 4 + i*8, t0, t1, t2, t3);
 	}
 
 	// Transform rows
-	for (int i = 0; i < 8; i += 4) {
-		b1 = plm_int4_load(temp + 4 * 8 + i);
-		b3 = plm_int4_add(plm_int4_load(temp + 2 * 8 + i), plm_int4_load(temp + 6 * 8 + i));
-		b4 = plm_int4_sub(plm_int4_load(temp + 5 * 8 + i), plm_int4_load(temp + 3 * 8 + i));
-		tmp1 = plm_int4_add(plm_int4_load(temp + 1 * 8 + i), plm_int4_load(temp + 7 * 8 + i));
-		tmp2 = plm_int4_add(plm_int4_load(temp + 3 * 8 + i), plm_int4_load(temp + 5 * 8 + i));
-		b6 = plm_int4_sub(plm_int4_load(temp + 1 * 8 + i), plm_int4_load(temp + 7 * 8 + i));
-		b7 = plm_int4_add(tmp1, tmp2);
-		m0 = plm_int4_load(temp + 0 * 8 + i);
-		x4 = plm_int4_sub(plm_int4_div64(plm_int4_sub(plm_int4_muli(b6, 473), plm_int4_muli(b4, 196))), b7);
-		x0 = plm_int4_sub(x4, plm_int4_div64(plm_int4_muli(plm_int4_sub(tmp1, tmp2), 362)));
-		x1 = plm_int4_sub(m0, b1);
-		x2 = plm_int4_sub(plm_int4_div64(plm_int4_muli(plm_int4_sub(plm_int4_load(temp + 2 * 8 + i), plm_int4_load(temp + 6 * 8 + i)), 362)), b3);
-		x3 = plm_int4_add(m0, b1);
-		y3 = plm_int4_add(x1, x2);
-		y4 = plm_int4_add(x3, b3);
-		y5 = plm_int4_sub(x1, x2);
-		y6 = plm_int4_sub(x3, b3);
-		y7 = plm_int4_add(x0, plm_int4_div64(plm_int4_add(plm_int4_muli(b4, 473), plm_int4_muli(b6, 196))));
+	for (int i = 0; i < 8; i += width) {
+		b1 = plm_vint_load(temp + 4 * 8 + i);
+		b3 = plm_vint_add(plm_vint_load(temp + 2 * 8 + i), plm_vint_load(temp + 6 * 8 + i));
+		b4 = plm_vint_sub(plm_vint_load(temp + 5 * 8 + i), plm_vint_load(temp + 3 * 8 + i));
+		tmp1 = plm_vint_add(plm_vint_load(temp + 1 * 8 + i), plm_vint_load(temp + 7 * 8 + i));
+		tmp2 = plm_vint_add(plm_vint_load(temp + 3 * 8 + i), plm_vint_load(temp + 5 * 8 + i));
+		b6 = plm_vint_sub(plm_vint_load(temp + 1 * 8 + i), plm_vint_load(temp + 7 * 8 + i));
+		b7 = plm_vint_add(tmp1, tmp2);
+		m0 = plm_vint_load(temp + 0 * 8 + i);
+		x4 = plm_vint_sub(plm_vint_div256(plm_vint_sub(plm_vint_muli(b6, 473), plm_vint_muli(b4, 196))), b7);
+		x0 = plm_vint_sub(x4, plm_vint_div256(plm_vint_muli(plm_vint_sub(tmp1, tmp2), 362)));
+		x1 = plm_vint_sub(m0, b1);
+		x2 = plm_vint_sub(plm_vint_div256(plm_vint_muli(plm_vint_sub(plm_vint_load(temp + 2 * 8 + i), plm_vint_load(temp + 6 * 8 + i)), 362)), b3);
+		x3 = plm_vint_add(m0, b1);
+		y3 = plm_vint_add(x1, x2);
+		y4 = plm_vint_add(x3, b3);
+		y5 = plm_vint_sub(x1, x2);
+		y6 = plm_vint_sub(x3, b3);
+		y7 = plm_vint_add(x0, plm_vint_div256(plm_vint_add(plm_vint_muli(b4, 473), plm_vint_muli(b6, 196))));
 
-		t0 = plm_int4_div64(plm_int4_add(b7, y4));
-		t1 = plm_int4_div64(plm_int4_add(x4, y3));
-		t2 = plm_int4_div64(plm_int4_sub(y5, x0));
-		t3 = plm_int4_div64(plm_int4_add(y6, y7));
-		plm_int4_store_transpose(block + 0 + i*8, t0, t1, t2, t3);
+		t0 = plm_vint_div256(plm_vint_add(b7, y4));
+		t1 = plm_vint_div256(plm_vint_add(x4, y3));
+		t2 = plm_vint_div256(plm_vint_sub(y5, x0));
+		t3 = plm_vint_div256(plm_vint_add(y6, y7));
+		plm_vint_store_transpose(block + 0 + i*8, t0, t1, t2, t3);
 
-		t0 = plm_int4_div64(plm_int4_sub(y6, y7));
-		t1 = plm_int4_div64(plm_int4_add(x0, y5));
-		t2 = plm_int4_div64(plm_int4_sub(y3, x4));
-		t3 = plm_int4_div64(plm_int4_sub(y4, b7));
-		plm_int4_store_transpose(block + 4 + i*8, t0, t1, t2, t3);
+		t0 = plm_vint_div256(plm_vint_sub(y6, y7));
+		t1 = plm_vint_div256(plm_vint_add(x0, y5));
+		t2 = plm_vint_div256(plm_vint_sub(y3, x4));
+		t3 = plm_vint_div256(plm_vint_sub(y4, b7));
+		plm_vint_store_transpose(block + 4 + i*8, t0, t1, t2, t3);
 	}
 }
 
@@ -4233,7 +4219,7 @@ int plm_audio_decode_header(plm_audio_t *self) {
 
 	self->version = plm_buffer_read(self->buffer, 2);
 	self->layer = plm_buffer_read(self->buffer, 2);
-	int hasCRC = !plm_buffer_read(self->buffer, 1);
+	int hasCRC = !plm_buffer_read_bit(self->buffer);
 
 	if (
 		self->version != PLM_AUDIO_MPEG_1 ||
@@ -4252,7 +4238,7 @@ int plm_audio_decode_header(plm_audio_t *self) {
 		return 0;
 	}
 
-	int padding = plm_buffer_read(self->buffer, 1);
+	int padding = plm_buffer_read_bit(self->buffer);
 	plm_buffer_skip(self->buffer, 1); // f_private
 	int mode = plm_buffer_read(self->buffer, 2);
 

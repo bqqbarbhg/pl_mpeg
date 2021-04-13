@@ -813,6 +813,9 @@ plm_samples_t *plm_audio_decode(plm_audio_t *self);
 #endif
 #endif
 
+#define PLM_USE_SSE
+#include <immintrin.h>
+
 
 // -----------------------------------------------------------------------------
 // plm (high-level interface) implementation
@@ -3257,6 +3260,77 @@ void plm_video_interpolate_macroblock(plm_video_t *self, int motion_h, int motio
 	plm_video_process_macroblock(self, s->cb.data, d->cb.data, motion_h / 2, motion_v / 2, 8, TRUE);
 }
 
+#if defined(PLM_USE_SSE)
+
+#define plm_vec8_copy(dst, src) (*(int64_t*)(dst) = *(const int64_t*)(src))
+#define plm_vec8_avg2(dst, a, b) _mm_storeu_epi64((dst), _mm_avg_epu8(_mm_loadu_epi64(a), _mm_loadu_epi64(b)))
+
+PLM_FORCEINLINE void plm_vec8_avg4(uint8_t *dst, const uint8_t *a, const uint8_t *b, const uint8_t *c, const uint8_t *d)
+{
+	__m128i ma = _mm_loadu_epi64(a), mb = _mm_loadu_epi64(b);
+	__m128i mc = _mm_loadu_epi64(c), md = _mm_loadu_epi64(d);
+	__m128i zero = _mm_setzero_si128(), two = _mm_set1_epi16(2);
+
+	__m128i lo = _mm_add_epi16(two, _mm_add_epi16(
+		_mm_add_epi16(_mm_unpacklo_epi8(ma, zero), _mm_unpacklo_epi8(mb, zero)),
+		_mm_add_epi16(_mm_unpacklo_epi8(mc, zero), _mm_unpacklo_epi8(md, zero))));
+	_mm_storeu_epi64(dst, _mm_packus_epi16(_mm_srli_epi16(lo, 2), zero));
+}
+
+#define plm_vec16_copy(dst, src) _mm_storeu_si128((__m128i*)(dst), _mm_loadu_si128((const __m128i*)(src)))
+#define plm_vec16_avg2(dst, a, b) _mm_storeu_si128((__m128i*)(dst), _mm_avg_epu8(_mm_loadu_si128((const __m128i*)(a)), _mm_loadu_si128((const __m128i*)(b))))
+
+PLM_FORCEINLINE void plm_vec16_avg4(uint8_t *dst, const uint8_t *a, const uint8_t *b, const uint8_t *c, const uint8_t *d)
+{
+	__m128i ma = _mm_loadu_si128((const __m128i*)a), mb = _mm_loadu_si128((const __m128i*)b);
+	__m128i mc = _mm_loadu_si128((const __m128i*)c), md = _mm_loadu_si128((const __m128i*)d);
+	__m128i zero = _mm_setzero_si128(), two = _mm_set1_epi16(2);
+
+	__m128i lo = _mm_add_epi16(two, _mm_add_epi16(
+		_mm_add_epi16(_mm_unpacklo_epi8(ma, zero), _mm_unpacklo_epi8(mb, zero)),
+		_mm_add_epi16(_mm_unpacklo_epi8(mc, zero), _mm_unpacklo_epi8(md, zero))));
+	__m128i hi = _mm_add_epi16(two, _mm_add_epi16(
+		_mm_add_epi16(_mm_unpackhi_epi8(ma, zero), _mm_unpackhi_epi8(mb, zero)),
+		_mm_add_epi16(_mm_unpackhi_epi8(mc, zero), _mm_unpackhi_epi8(md, zero))));
+	_mm_storeu_si128((__m128i*)dst, _mm_packus_epi16(_mm_srli_epi16(lo, 2), _mm_srli_epi16(hi, 2)));
+}
+
+#else
+
+#define plm_vec8_copy(dst, src) memcpy((dst), (src), 8)
+
+PLM_FORCEINLINE void plm_vec8_avg2(uint8_t *dst, const uint8_t *a, const uint8_t *b)
+{
+	for (size_t i = 0; i < 8; i++) {
+		dst[i] = (uint8_t)((a[i] + b[i] + 1) >> 1);
+	}
+}
+
+PLM_FORCEINLINE void plm_vec8_avg4(uint8_t *dst, const uint8_t *a, const uint8_t *b, const uint8_t *c, const uint8_t *d)
+{
+	for (size_t i = 0; i < 8; i++) {
+		dst[i] = (uint8_t)((a[i] + b[i] + c[i] + d[i] + 2) >> 2);
+	}
+}
+
+#define plm_vec16_copy(dst, src) memcpy((dst), (src), 16)
+
+PLM_FORCEINLINE void plm_vec16_avg2(uint8_t *dst, const uint8_t *a, const uint8_t *b)
+{
+	for (size_t i = 0; i < 16; i++) {
+		dst[i] = (uint8_t)((a[i] + b[i] + 1) >> 1);
+	}
+}
+
+PLM_FORCEINLINE void plm_vec16_avg4(uint8_t *dst, const uint8_t *a, const uint8_t *b, const uint8_t *c, const uint8_t *d)
+{
+	for (size_t i = 0; i < 16; i++) {
+		dst[i] = (uint8_t)((a[i] + b[i] + c[i] + d[i] + 2) >> 2);
+	}
+}
+
+#endif
+
 #define PLM_BLOCK_SET(DEST, DEST_INDEX, DEST_WIDTH, SOURCE_INDEX, SOURCE_WIDTH, BLOCK_SIZE, OP) do { \
 	int dest_scan = DEST_WIDTH - BLOCK_SIZE; \
 	int source_scan = SOURCE_WIDTH - BLOCK_SIZE; \
@@ -3287,25 +3361,46 @@ void plm_video_process_macroblock(
 	if (si > max_address || di > max_address) {
 		return; // corrupt video
 	}
+	#define PLM_MB_SET(BLOCK_SIZE, OP) do { \
+		for (int y = 0; y < BLOCK_SIZE; y++) { \
+			OP; \
+			s += dw; \
+			d += dw; \
+		}} while(FALSE)
 
-	#define PLM_MB_CASE(INTERPOLATE, ODD_H, ODD_V, OP) \
-		case ((INTERPOLATE << 2) | (ODD_H << 1) | (ODD_V)): \
-			PLM_BLOCK_SET(d, di, dw, si, dw, block_size, OP); \
+	#define PLM_MB_CASE_8(ODD_H, ODD_V, OP) \
+		case ((0 << 3) | (0 << 2) | (ODD_H << 1) | (ODD_V)): \
+			PLM_MB_SET(8, OP); \
+			break; \
+		case ((0 << 3) | (1 << 2) | (ODD_H << 1) | (ODD_V)): \
+			PLM_MB_SET(8, (plm_vec8_copy(tmp, d), OP, plm_vec8_avg2(d, d, tmp))); \
 			break
 
-	switch ((interpolate << 2) | (odd_h << 1) | (odd_v)) {
-		PLM_MB_CASE(0, 0, 0, (s[si]));
-		PLM_MB_CASE(0, 0, 1, (s[si] + s[si + dw] + 1) >> 1);
-		PLM_MB_CASE(0, 1, 0, (s[si] + s[si + 1] + 1) >> 1);
-		PLM_MB_CASE(0, 1, 1, (s[si] + s[si + 1] + s[si + dw] + s[si + dw + 1] + 2) >> 2);
+	#define PLM_MB_CASE_16(ODD_H, ODD_V, OP) \
+		case ((1 << 3) | (0 << 2) | (ODD_H << 1) | (ODD_V)): \
+			PLM_MB_SET(16, OP); \
+			break; \
+		case ((1 << 3) | (1 << 2) | (ODD_H << 1) | (ODD_V)): \
+			PLM_MB_SET(16, (plm_vec16_copy(tmp, d), OP, plm_vec16_avg2(d, d, tmp))); \
+			break
 
-		PLM_MB_CASE(1, 0, 0, (d[di] + (s[si]) + 1) >> 1);
-		PLM_MB_CASE(1, 0, 1, (d[di] + ((s[si] + s[si + dw] + 1) >> 1) + 1) >> 1);
-		PLM_MB_CASE(1, 1, 0, (d[di] + ((s[si] + s[si + 1] + 1) >> 1) + 1) >> 1);
-		PLM_MB_CASE(1, 1, 1, (d[di] + ((s[si] + s[si + 1] + s[si + dw] + s[si + dw + 1] + 2) >> 2) + 1) >> 1);
+	s += si;
+	d += di;
+
+	uint8_t tmp[16];
+	switch ((block_size == 16 ? (1 << 3) : 0) | (interpolate << 2) | (odd_h << 1) | (odd_v)) {
+		PLM_MB_CASE_8(0, 0, plm_vec8_copy(d, s));
+		PLM_MB_CASE_8(0, 1, plm_vec8_avg2(d, s, s + dw));
+		PLM_MB_CASE_8(1, 0, plm_vec8_avg2(d, s, s + 1));
+		PLM_MB_CASE_8(1, 1, plm_vec8_avg4(d, s, s + 1, s + dw, s + dw + 1));
+		PLM_MB_CASE_16(0, 0, plm_vec16_copy(d, s));
+		PLM_MB_CASE_16(0, 1, plm_vec16_avg2(d, s, s + dw));
+		PLM_MB_CASE_16(1, 0, plm_vec16_avg2(d, s, s + 1));
+		PLM_MB_CASE_16(1, 1, plm_vec16_avg4(d, s, s + 1, s + dw, s + dw + 1));
 	}
 
-	#undef PLM_MB_CASE
+	#undef PLM_MB_CASE_8
+	#undef PLM_MB_CASE_16
 }
 
 void plm_video_decode_block(plm_video_t *self, int block) {

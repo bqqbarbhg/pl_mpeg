@@ -1,3 +1,7 @@
+#ifdef __INTELLISENSE__
+#define PL_MPEG_IMPLEMENTATION
+#endif
+
 /*
 PL_MPEG - MPEG1 Video decoder, MP2 Audio decoder, MPEG-PS demuxer
 
@@ -826,6 +830,7 @@ plm_samples_t *plm_audio_decode(plm_audio_t *self);
 #if defined(PLM_USE_SSE)
 	#include <xmmintrin.h>
 	#include <emmintrin.h>
+	#include <smmintrin.h>
 #endif
 
 // -----------------------------------------------------------------------------
@@ -3568,10 +3573,187 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 	}
 }
 
+#if defined(PLM_USE_SSE) && 0
+
+typedef __m128i plm_int4;
+
+#define plm_int4_load(ptr) _mm_load_si128((const __m128i*)(ptr))
+#define plm_int4_add(a, b) _mm_add_epi32((a), (b))
+#define plm_int4_addi(a, b) _mm_add_epi32((a), _mm_set1_epi32(b))
+#define plm_int4_sub(a, b) _mm_sub_epi32((a), (b))
+#define plm_int4_div64(a) _mm_srai_epi32(_mm_add_epi32((a), _mm_set1_epi32(128)), 8)
+
+PLM_FORCEINLINE plm_int4 plm_int4_muli(plm_int4 a, int b)
+{
+	__m128i bs = _mm_set1_epi32(b);
+	__m128i lo = _mm_mul_epu32(a, bs);
+	__m128i hi = _mm_mul_epu32(_mm_srli_si128(a, 4), bs);
+	return _mm_unpacklo_epi32(
+		_mm_shuffle_epi32(lo, _MM_SHUFFLE(3,2,2,0)),
+		_mm_shuffle_epi32(hi, _MM_SHUFFLE(3,2,2,0)));
+}
+
+PLM_FORCEINLINE void plm_int4_store_transpose(int *dst, plm_int4 a, plm_int4 b, plm_int4 c, plm_int4 d)
+{
+	__m128i t0 = _mm_unpacklo_epi32(a, b);
+	__m128i t1 = _mm_unpacklo_epi32(c, d);
+	__m128i t2 = _mm_unpackhi_epi32(a, b);
+	__m128i t3 = _mm_unpackhi_epi32(c, d);
+	_mm_storeu_si128((__m128i*)(dst + 0*8), _mm_unpacklo_epi64(t0, t1));
+	_mm_storeu_si128((__m128i*)(dst + 1*8), _mm_unpackhi_epi64(t0, t1));
+	_mm_storeu_si128((__m128i*)(dst + 2*8), _mm_unpacklo_epi64(t2, t3));
+	_mm_storeu_si128((__m128i*)(dst + 3*8), _mm_unpackhi_epi64(t2, t3));
+}
+
+#else
+
+typedef struct {
+	int v[4];
+} plm_int4;
+
+PLM_FORCEINLINE plm_int4 plm_int4_load(const void *src)
+{
+	plm_int4 r;
+	memcpy(&r, src, sizeof(plm_int4));
+	return r;
+}
+
+PLM_FORCEINLINE plm_int4 plm_int4_add(plm_int4 a, plm_int4 b)
+{
+	plm_int4 r;
+	for (int i = 0; i < 4; i++) r.v[i] = a.v[i] + b.v[i];
+	return r;
+}
+
+PLM_FORCEINLINE plm_int4 plm_int4_addi(plm_int4 a, int b)
+{
+	plm_int4 r;
+	for (int i = 0; i < 4; i++) r.v[i] = a.v[i] + b;
+	return r;
+}
+
+PLM_FORCEINLINE plm_int4 plm_int4_sub(plm_int4 a, plm_int4 b)
+{
+	plm_int4 r;
+	for (int i = 0; i < 4; i++) r.v[i] = a.v[i] - b.v[i];
+	return r;
+}
+
+PLM_FORCEINLINE plm_int4 plm_int4_muli(plm_int4 a, int b)
+{
+	plm_int4 r;
+	for (int i = 0; i < 4; i++) r.v[i] = a.v[i] * b;
+	return r;
+}
+
+PLM_FORCEINLINE plm_int4 plm_int4_div64(plm_int4 a)
+{
+	plm_int4 r;
+	for (int i = 0; i < 4; i++) r.v[i] = (a.v[i] + 128) >> 8;
+	return r;
+}
+
+PLM_FORCEINLINE void plm_int4_store_transpose(int *dst, plm_int4 a, plm_int4 b, plm_int4 c, plm_int4 d)
+{
+	for (int i = 0; i < 4; i++) {
+		dst[0 + 8*i] = a.v[i];
+		dst[1 + 8*i] = b.v[i];
+		dst[2 + 8*i] = c.v[i];
+		dst[3 + 8*i] = d.v[i];
+	}
+}
+
+#endif
+
+#if 1
+
+void plm_video_idct(int *block) {
+	plm_int4
+		b1, b3, b4, b6, b7, tmp1, tmp2, m0,
+		x0, x1, x2, x3, x4, y3, y4, y5, y6, y7;
+
+	plm_int4
+		t0, t1, t2, t3;
+
+	int temp[64];
+
+	// Transform columns
+	for (int i = 0; i < 8; i += 4) {
+		b1 = plm_int4_load(block + 4 * 8 + i);
+		b3 = plm_int4_add(plm_int4_load(block + 2 * 8 + i), plm_int4_load(block + 6 * 8 + i));
+		b4 = plm_int4_sub(plm_int4_load(block + 5 * 8 + i), plm_int4_load(block + 3 * 8 + i));
+		tmp1 = plm_int4_add(plm_int4_load(block + 1 * 8 + i), plm_int4_load(block + 7 * 8 + i));
+		tmp2 = plm_int4_add(plm_int4_load(block + 3 * 8 + i), plm_int4_load(block + 5 * 8 + i));
+		b6 = plm_int4_sub(plm_int4_load(block + 1 * 8 + i), plm_int4_load(block + 7 * 8 + i));
+		b7 = plm_int4_add(tmp1, tmp2);
+		m0 = plm_int4_load(block + 0 * 8 + i);
+		x4 = plm_int4_sub(plm_int4_div64(plm_int4_sub(plm_int4_muli(b6, 473), plm_int4_muli(b4, 196))), b7);
+		x0 = plm_int4_sub(x4, plm_int4_div64(plm_int4_muli(plm_int4_sub(tmp1, tmp2), 362)));
+		x1 = plm_int4_sub(m0, b1);
+		x2 = plm_int4_sub(plm_int4_div64(plm_int4_muli(plm_int4_sub(plm_int4_load(block + 2 * 8 + i), plm_int4_load(block + 6 * 8 + i)), 362)), b3);
+		x3 = plm_int4_add(m0, b1);
+		y3 = plm_int4_add(x1, x2);
+		y4 = plm_int4_add(x3, b3);
+		y5 = plm_int4_sub(x1, x2);
+		y6 = plm_int4_sub(x3, b3);
+		y7 = plm_int4_add(x0, plm_int4_div64(plm_int4_add(plm_int4_muli(b4, 473), plm_int4_muli(b6, 196))));
+
+		t0 = plm_int4_add(b7, y4);
+		t1 = plm_int4_add(x4, y3);
+		t2 = plm_int4_sub(y5, x0);
+		t3 = plm_int4_add(y6, y7);
+		plm_int4_store_transpose(temp + 0 + i*8, t0, t1, t2, t3);
+
+		t0 = plm_int4_sub(y6, y7);
+		t1 = plm_int4_add(x0, y5);
+		t2 = plm_int4_sub(y3, x4);
+		t3 = plm_int4_sub(y4, b7);
+		plm_int4_store_transpose(temp + 4 + i*8, t0, t1, t2, t3);
+	}
+
+	// Transform rows
+	for (int i = 0; i < 8; i += 4) {
+		b1 = plm_int4_load(temp + 4 * 8 + i);
+		b3 = plm_int4_add(plm_int4_load(temp + 2 * 8 + i), plm_int4_load(temp + 6 * 8 + i));
+		b4 = plm_int4_sub(plm_int4_load(temp + 5 * 8 + i), plm_int4_load(temp + 3 * 8 + i));
+		tmp1 = plm_int4_add(plm_int4_load(temp + 1 * 8 + i), plm_int4_load(temp + 7 * 8 + i));
+		tmp2 = plm_int4_add(plm_int4_load(temp + 3 * 8 + i), plm_int4_load(temp + 5 * 8 + i));
+		b6 = plm_int4_sub(plm_int4_load(temp + 1 * 8 + i), plm_int4_load(temp + 7 * 8 + i));
+		b7 = plm_int4_add(tmp1, tmp2);
+		m0 = plm_int4_load(temp + 0 * 8 + i);
+		x4 = plm_int4_sub(plm_int4_div64(plm_int4_sub(plm_int4_muli(b6, 473), plm_int4_muli(b4, 196))), b7);
+		x0 = plm_int4_sub(x4, plm_int4_div64(plm_int4_muli(plm_int4_sub(tmp1, tmp2), 362)));
+		x1 = plm_int4_sub(m0, b1);
+		x2 = plm_int4_sub(plm_int4_div64(plm_int4_muli(plm_int4_sub(plm_int4_load(temp + 2 * 8 + i), plm_int4_load(temp + 6 * 8 + i)), 362)), b3);
+		x3 = plm_int4_add(m0, b1);
+		y3 = plm_int4_add(x1, x2);
+		y4 = plm_int4_add(x3, b3);
+		y5 = plm_int4_sub(x1, x2);
+		y6 = plm_int4_sub(x3, b3);
+		y7 = plm_int4_add(x0, plm_int4_div64(plm_int4_add(plm_int4_muli(b4, 473), plm_int4_muli(b6, 196))));
+
+		t0 = plm_int4_div64(plm_int4_add(b7, y4));
+		t1 = plm_int4_div64(plm_int4_add(x4, y3));
+		t2 = plm_int4_div64(plm_int4_sub(y5, x0));
+		t3 = plm_int4_div64(plm_int4_add(y6, y7));
+		plm_int4_store_transpose(block + 0 + i*8, t0, t1, t2, t3);
+
+		t0 = plm_int4_div64(plm_int4_sub(y6, y7));
+		t1 = plm_int4_div64(plm_int4_add(x0, y5));
+		t2 = plm_int4_div64(plm_int4_sub(y3, x4));
+		t3 = plm_int4_div64(plm_int4_sub(y4, b7));
+		plm_int4_store_transpose(block + 4 + i*8, t0, t1, t2, t3);
+	}
+}
+
+#else
+
 void plm_video_idct(int *block) {
 	int
 		b1, b3, b4, b6, b7, tmp1, tmp2, m0,
 		x0, x1, x2, x3, x4, y3, y4, y5, y6, y7;
+
+	int temp[64];
 
 	// Transform columns
 	for (int i = 0; i < 8; ++i) {
@@ -3593,46 +3775,48 @@ void plm_video_idct(int *block) {
 		y5 = x1 - x2;
 		y6 = x3 - b3;
 		y7 = -x0 - ((b4 * 473 + b6 * 196 + 128) >> 8);
-		block[0 * 8 + i] = b7 + y4;
-		block[1 * 8 + i] = x4 + y3;
-		block[2 * 8 + i] = y5 - x0;
-		block[3 * 8 + i] = y6 - y7;
-		block[4 * 8 + i] = y6 + y7;
-		block[5 * 8 + i] = x0 + y5;
-		block[6 * 8 + i] = y3 - x4;
-		block[7 * 8 + i] = y4 - b7;
+		temp[i * 8 + 0] = b7 + y4;
+		temp[i * 8 + 1] = x4 + y3;
+		temp[i * 8 + 2] = y5 - x0;
+		temp[i * 8 + 3] = y6 - y7;
+		temp[i * 8 + 4] = y6 + y7;
+		temp[i * 8 + 5] = x0 + y5;
+		temp[i * 8 + 6] = y3 - x4;
+		temp[i * 8 + 7] = y4 - b7;
 	}
 
 	// Transform rows
-	for (int i = 0; i < 64; i += 8) {
-		b1 = block[4 + i];
-		b3 = block[2 + i] + block[6 + i];
-		b4 = block[5 + i] - block[3 + i];
-		tmp1 = block[1 + i] + block[7 + i];
-		tmp2 = block[3 + i] + block[5 + i];
-		b6 = block[1 + i] - block[7 + i];
+	for (int i = 0; i < 8; ++i) {
+		b1 = temp[4*8 + i];
+		b3 = temp[2*8 + i] + temp[6*8 + i];
+		b4 = temp[5*8 + i] - temp[3*8 + i];
+		tmp1 = temp[1*8 + i] + temp[7*8 + i];
+		tmp2 = temp[3*8 + i] + temp[5*8 + i];
+		b6 = temp[1*8 + i] - temp[7*8 + i];
 		b7 = tmp1 + tmp2;
-		m0 = block[0 + i];
+		m0 = temp[0*8 + i];
 		x4 = ((b6 * 473 - b4 * 196 + 128) >> 8) - b7;
 		x0 = x4 - (((tmp1 - tmp2) * 362 + 128) >> 8);
 		x1 = m0 - b1;
-		x2 = (((block[2 + i] - block[6 + i]) * 362 + 128) >> 8) - b3;
+		x2 = (((temp[2*8 + i] - temp[6*8 + i]) * 362 + 128) >> 8) - b3;
 		x3 = m0 + b1;
 		y3 = x1 + x2;
 		y4 = x3 + b3;
 		y5 = x1 - x2;
 		y6 = x3 - b3;
 		y7 = -x0 - ((b4 * 473 + b6 * 196 + 128) >> 8);
-		block[0 + i] = (b7 + y4 + 128) >> 8;
-		block[1 + i] = (x4 + y3 + 128) >> 8;
-		block[2 + i] = (y5 - x0 + 128) >> 8;
-		block[3 + i] = (y6 - y7 + 128) >> 8;
-		block[4 + i] = (y6 + y7 + 128) >> 8;
-		block[5 + i] = (x0 + y5 + 128) >> 8;
-		block[6 + i] = (y3 - x4 + 128) >> 8;
-		block[7 + i] = (y4 - b7 + 128) >> 8;
+		block[0 + i*8] = (b7 + y4 + 128) >> 8;
+		block[1 + i*8] = (x4 + y3 + 128) >> 8;
+		block[2 + i*8] = (y5 - x0 + 128) >> 8;
+		block[3 + i*8] = (y6 - y7 + 128) >> 8;
+		block[4 + i*8] = (y6 + y7 + 128) >> 8;
+		block[5 + i*8] = (x0 + y5 + 128) >> 8;
+		block[6 + i*8] = (y3 - x4 + 128) >> 8;
+		block[7 + i*8] = (y4 - b7 + 128) >> 8;
 	}
 }
+
+#endif
 
 // YCbCr conversion following the BT.601 standard:
 // https://infogalactic.com/info/YCbCr#ITU-R_BT.601_conversion

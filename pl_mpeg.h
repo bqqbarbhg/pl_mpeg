@@ -1316,6 +1316,46 @@ enum plm_buffer_mode {
 	PLM_BUFFER_MODE_APPEND
 };
 
+typedef struct {
+	int16_t index;
+	int16_t value;
+} plm_vlc_t;
+
+typedef struct {
+	int16_t index;
+	uint16_t value;
+} plm_vlc_uint_t;
+
+// [0:4] bit advance
+// [4:16] value / initial state
+typedef struct {
+	const plm_vlc_t *table;
+	uint16_t *entries;
+	size_t size_mask;
+	size_t max_bits;
+} plm_vlc_lut_t;
+
+typedef struct {
+	plm_vlc_lut_t video_macroblock_address_increment;
+	plm_vlc_lut_t video_macroblock_type[4];
+	plm_vlc_lut_t video_code_block_pattern;
+	plm_vlc_lut_t video_motion;
+	plm_vlc_lut_t video_dct_size[3];
+	plm_vlc_lut_t video_dct_coeff;
+
+	uint16_t data_video_macroblock_address_increment[32];
+	uint16_t data_video_macroblock_type_intra[4];
+	uint16_t data_video_macroblock_type_predictive[16];
+	uint16_t data_video_macroblock_type_b[16];
+	uint16_t data_video_code_block_pattern[16];
+	uint16_t data_video_motion[256];
+	uint16_t data_video_dct_size_luminance[16];
+	uint16_t data_video_dct_size_chrominance[16];
+	uint16_t data_video_dct_coeff[256];
+} plm_vlc_lut_tables_t;
+
+void plm_init_lut_tables(plm_vlc_lut_tables_t *tables);
+
 typedef struct plm_buffer_t {
 	size_t bit_index;
 	size_t capacity;
@@ -1332,17 +1372,6 @@ typedef struct plm_buffer_t {
 	enum plm_buffer_mode mode;
 } plm_buffer_t;
 
-typedef struct {
-	int16_t index;
-	int16_t value;
-} plm_vlc_t;
-
-typedef struct {
-	int16_t index;
-	uint16_t value;
-} plm_vlc_uint_t;
-
-
 void plm_buffer_seek(plm_buffer_t *self, size_t pos);
 size_t plm_buffer_tell(plm_buffer_t *self);
 void plm_buffer_discard_read_bytes(plm_buffer_t *self);
@@ -1356,8 +1385,7 @@ int plm_buffer_skip_bytes(plm_buffer_t *self, uint8_t v);
 int plm_buffer_next_start_code(plm_buffer_t *self);
 int plm_buffer_find_start_code(plm_buffer_t *self, int code);
 int plm_buffer_no_start_code(plm_buffer_t *self);
-int16_t plm_buffer_read_vlc(plm_buffer_t *self, const plm_vlc_t *table);
-uint16_t plm_buffer_read_vlc_uint(plm_buffer_t *self, const plm_vlc_uint_t *table);
+int16_t plm_buffer_read_vlc(plm_buffer_t *self, const plm_vlc_lut_t *table);
 
 plm_buffer_t *plm_buffer_create_with_filename(const char *filename) {
 	FILE *fh = fopen(filename, "rb");
@@ -1656,19 +1684,68 @@ int plm_buffer_no_start_code(plm_buffer_t *self) {
 	);
 }
 
-int16_t plm_buffer_read_vlc(plm_buffer_t *self, const plm_vlc_t *table) {
-	plm_vlc_t state = {0, 0};
+int16_t plm_buffer_read_vlc_slow(plm_buffer_t *self, const plm_vlc_t *table, int16_t init_state) {
+	plm_vlc_t state = {init_state, 0};
 	do {
 		state = table[state.index + plm_buffer_read(self, 1)];
 	} while (state.index > 0);
 	return state.value;
 }
 
-uint16_t plm_buffer_read_vlc_uint(plm_buffer_t *self, const plm_vlc_uint_t *table) {
-	return (uint16_t)plm_buffer_read_vlc(self, (const plm_vlc_t *)table);
+int16_t plm_buffer_read_vlc(plm_buffer_t *self, const plm_vlc_lut_t *table) {
+	int16_t init_state = 0;
+
+	if (((self->length << 3) - self->bit_index) >= 16) {
+		const uint8_t *bytes = self->bytes + (self->bit_index >> 3);
+		uint32_t a = bytes[0], b = bytes[1];
+		uint32_t lookahead = (a << 8 | b) >> (16 - table->max_bits - (self->bit_index & 0x7));
+
+		uint16_t entry = table->entries[lookahead & table->size_mask];
+		uint32_t advance = entry & 0xf;
+		int16_t value = (int16_t)entry >> 4;
+		if (advance > 0) {
+			self->bit_index += advance;
+			return value;
+		} else if (value > 0) {
+			self->bit_index += table->max_bits;
+			init_state = value;
+		}
+	}
+
+	return plm_buffer_read_vlc_slow(self, table->table, init_state);
 }
 
+void plm_vlc_lut_init(plm_vlc_lut_t *table, uint16_t *entries, size_t sizeof_entries, const plm_vlc_t *vlc) {
+	table->table = vlc;
+	table->entries = entries;
+	table->size_mask = 1;
+	table->max_bits = 0;
+	while (table->size_mask * sizeof(uint16_t) < sizeof_entries) {
+		table->size_mask *= 2;
+		table->max_bits += 1;
+	}
+	table->size_mask -= 1;
 
+	size_t size_mask = table->size_mask;
+	size_t max_bits = table->max_bits;
+	for (size_t bits = 0; bits < size_mask; bits++) {
+		plm_vlc_t state = {0, 0};
+
+		size_t bit_ix;
+		for (bit_ix = 0; bit_ix < max_bits; bit_ix++) {
+			state = vlc[state.index + ((bits >> (max_bits - 1 - bit_ix)) & 1)];
+			if (state.index <= 0) break;
+		}
+
+		if (state.index > 0 && (int16_t)(state.index << 4) >> 4 == state.index && false) {
+			entries[bits] = state.index << 4;
+		} else if (state.index == 0 && (int16_t)(state.value << 4) >> 4 == state.value) {
+			entries[bits] = (uint16_t)(bit_ix + 1) | (uint16_t)(state.value << 4);
+		} else {
+			entries[bits] = 0;
+		}
+	}
+}
 
 // ----------------------------------------------------------------------------
 // plm_demux implementation
@@ -2598,6 +2675,9 @@ typedef struct plm_video_t {
 
 	int has_reference_frame;
 	int assume_no_b_frames;
+
+	plm_vlc_lut_tables_t luts;
+
 } plm_video_t;
 
 static inline uint8_t plm_clamp(int n) {
@@ -2627,6 +2707,8 @@ void plm_video_idct(int *block);
 plm_video_t * plm_video_create_with_buffer(plm_buffer_t *buffer, int destroy_when_done) {
 	plm_video_t *self = (plm_video_t *)malloc(sizeof(plm_video_t));
 	memset(self, 0, sizeof(plm_video_t));
+
+	plm_init_lut_tables(&self->luts);
 	
 	self->buffer = buffer;
 	self->destroy_buffer_when_done = destroy_when_done;
@@ -2962,16 +3044,16 @@ void plm_video_decode_slice(plm_video_t *self, int slice) {
 void plm_video_decode_macroblock(plm_video_t *self) {
 	// Decode self->macroblock_address_increment
 	int increment = 0;
-	int t = plm_buffer_read_vlc(self->buffer, PLM_VIDEO_MACROBLOCK_ADDRESS_INCREMENT);
+	int t = plm_buffer_read_vlc(self->buffer, &self->luts.video_macroblock_address_increment);
 
 	while (t == 34) {
 		// macroblock_stuffing
-		t = plm_buffer_read_vlc(self->buffer, PLM_VIDEO_MACROBLOCK_ADDRESS_INCREMENT);
+		t = plm_buffer_read_vlc(self->buffer, &self->luts.video_macroblock_address_increment);
 	}
 	while (t == 35) {
 		// macroblock_escape
 		increment += 33;
-		t = plm_buffer_read_vlc(self->buffer, PLM_VIDEO_MACROBLOCK_ADDRESS_INCREMENT);
+		t = plm_buffer_read_vlc(self->buffer, &self->luts.video_macroblock_address_increment);
 	}
 	increment += t;
 
@@ -3019,7 +3101,7 @@ void plm_video_decode_macroblock(plm_video_t *self) {
 	}
 
 	// Process the current macroblock
-	const plm_vlc_t *table = PLM_VIDEO_MACROBLOCK_TYPE[self->picture_type];
+	const plm_vlc_lut_t *table = &self->luts.video_macroblock_type[self->picture_type];
 	self->macroblock_type = plm_buffer_read_vlc(self->buffer, table);
 
 	self->macroblock_intra = (self->macroblock_type & 0x01);
@@ -3048,7 +3130,7 @@ void plm_video_decode_macroblock(plm_video_t *self) {
 
 	// Decode blocks
 	int cbp = ((self->macroblock_type & 0x02) != 0)
-		? plm_buffer_read_vlc(self->buffer, PLM_VIDEO_CODE_BLOCK_PATTERN)
+		? plm_buffer_read_vlc(self->buffer, &self->luts.video_code_block_pattern)
 		: (self->macroblock_intra ? 0x3f : 0);
 
 	for (int block = 0, mask = 0x20; block < 6; block++) {
@@ -3082,7 +3164,7 @@ void plm_video_decode_motion_vectors(plm_video_t *self) {
 
 int plm_video_decode_motion_vector(plm_video_t *self, int r_size, int motion) {
 	int fscale = 1 << r_size;
-	int m_code = plm_buffer_read_vlc(self->buffer, PLM_VIDEO_MOTION);
+	int m_code = plm_buffer_read_vlc(self->buffer, &self->luts.video_motion);
 	int r = 0;
 	int d;
 
@@ -3219,7 +3301,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		// DC prediction
 		int plane_index = block > 3 ? block - 3 : 0;
 		predictor = self->dc_predictor[plane_index];
-		dct_size = plm_buffer_read_vlc(self->buffer, PLM_VIDEO_DCT_SIZE[plane_index]);
+		dct_size = plm_buffer_read_vlc(self->buffer, &self->luts.video_dct_size[plane_index]);
 
 		// Read DC coeff
 		if (dct_size > 0) {
@@ -3252,7 +3334,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 	int level = 0;
 	while (TRUE) {
 		int run = 0;
-		uint16_t coeff = plm_buffer_read_vlc_uint(self->buffer, PLM_VIDEO_DCT_COEFF);
+		uint16_t coeff = (uint16_t)plm_buffer_read_vlc(self->buffer, &self->luts.video_dct_coeff);
 
 		if ((coeff == 0x0001) && (n > 0) && (plm_buffer_read(self->buffer, 1) == 0)) {
 			// end_of_block
@@ -4260,5 +4342,55 @@ void plm_audio_matrix_transform(int s[32][3], int ss, float *d, int dp) {
 	d[dp + 15] = t02; d[dp + 16] = 0.0;
 }
 
+void plm_init_lut_tables(plm_vlc_lut_tables_t *tables)
+{
+	plm_vlc_lut_init(&tables->video_macroblock_address_increment,
+		tables->data_video_macroblock_address_increment,
+		sizeof(tables->data_video_macroblock_address_increment),
+		PLM_VIDEO_MACROBLOCK_ADDRESS_INCREMENT);
+
+	plm_vlc_lut_init(&tables->video_macroblock_type[1],
+		tables->data_video_macroblock_type_intra,
+		sizeof(tables->data_video_macroblock_type_intra),
+		PLM_VIDEO_MACROBLOCK_TYPE_INTRA);
+
+	plm_vlc_lut_init(&tables->video_macroblock_type[2],
+		tables->data_video_macroblock_type_predictive,
+		sizeof(tables->data_video_macroblock_type_predictive),
+		PLM_VIDEO_MACROBLOCK_TYPE_PREDICTIVE);
+
+	plm_vlc_lut_init(&tables->video_macroblock_type[3],
+		tables->data_video_macroblock_type_b,
+		sizeof(tables->data_video_macroblock_type_b),
+		PLM_VIDEO_MACROBLOCK_TYPE_B);
+
+	plm_vlc_lut_init(&tables->video_code_block_pattern,
+		tables->data_video_code_block_pattern,
+		sizeof(tables->data_video_code_block_pattern),
+		PLM_VIDEO_CODE_BLOCK_PATTERN);
+
+	plm_vlc_lut_init(&tables->video_motion,
+		tables->data_video_motion,
+		sizeof(tables->data_video_motion),
+		PLM_VIDEO_MOTION);
+
+	plm_vlc_lut_init(&tables->video_dct_size[0],
+		tables->data_video_dct_size_luminance,
+		sizeof(tables->data_video_dct_size_luminance),
+		PLM_VIDEO_DCT_SIZE_LUMINANCE);
+
+	plm_vlc_lut_init(&tables->video_dct_size[1],
+		tables->data_video_dct_size_chrominance,
+		sizeof(tables->data_video_dct_size_chrominance),
+		PLM_VIDEO_DCT_SIZE_CHROMINANCE);
+
+	tables->video_dct_size[2] = tables->video_dct_size[1];
+
+	plm_vlc_lut_init(&tables->video_dct_coeff,
+		tables->data_video_dct_coeff,
+		sizeof(tables->data_video_dct_coeff),
+		(const plm_vlc_t*)PLM_VIDEO_DCT_COEFF);
+}
 
 #endif // PL_MPEG_IMPLEMENTATION
+

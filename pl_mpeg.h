@@ -814,7 +814,7 @@ plm_samples_t *plm_audio_decode(plm_audio_t *self);
 #endif
 
 #define PLM_USE_SSE
-#include <immintrin.h>
+#include <emmintrin.h>
 
 
 // -----------------------------------------------------------------------------
@@ -3263,18 +3263,18 @@ void plm_video_interpolate_macroblock(plm_video_t *self, int motion_h, int motio
 #if defined(PLM_USE_SSE)
 
 #define plm_vec8_copy(dst, src) (*(int64_t*)(dst) = *(const int64_t*)(src))
-#define plm_vec8_avg2(dst, a, b) _mm_storeu_epi64((dst), _mm_avg_epu8(_mm_loadu_epi64(a), _mm_loadu_epi64(b)))
+#define plm_vec8_avg2(dst, a, b) _mm_storel_epi64((__m128i*)(dst), _mm_avg_epu8(_mm_loadl_epi64((const __m128i*)(a)), _mm_loadl_epi64((const __m128i*)(b))))
 
 PLM_FORCEINLINE void plm_vec8_avg4(uint8_t *dst, const uint8_t *a, const uint8_t *b, const uint8_t *c, const uint8_t *d)
 {
-	__m128i ma = _mm_loadu_epi64(a), mb = _mm_loadu_epi64(b);
-	__m128i mc = _mm_loadu_epi64(c), md = _mm_loadu_epi64(d);
+	__m128i ma = _mm_loadl_epi64((const __m128i*)a), mb = _mm_loadl_epi64((const __m128i*)b);
+	__m128i mc = _mm_loadl_epi64((const __m128i*)c), md = _mm_loadl_epi64((const __m128i*)d);
 	__m128i zero = _mm_setzero_si128(), two = _mm_set1_epi16(2);
 
 	__m128i lo = _mm_add_epi16(two, _mm_add_epi16(
 		_mm_add_epi16(_mm_unpacklo_epi8(ma, zero), _mm_unpacklo_epi8(mb, zero)),
 		_mm_add_epi16(_mm_unpacklo_epi8(mc, zero), _mm_unpacklo_epi8(md, zero))));
-	_mm_storeu_epi64(dst, _mm_packus_epi16(_mm_srli_epi16(lo, 2), zero));
+	_mm_storel_epi64((__m128i*)dst, _mm_packus_epi16(_mm_srli_epi16(lo, 2), zero));
 }
 
 #define plm_vec16_copy(dst, src) _mm_storeu_si128((__m128i*)(dst), _mm_loadu_si128((const __m128i*)(src)))

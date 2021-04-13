@@ -803,6 +803,16 @@ plm_samples_t *plm_audio_decode(plm_audio_t *self);
 
 #define PLM_UNUSED(expr) (void)(expr)
 
+#ifndef PLM_FORCEINLINE
+#if defined(_MSC_VER)
+	#define PLM_FORCEINLINE __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+	#define PLM_FORCEINLINE __attribute__((always_inline))
+#else
+	#define PLM_FORCEINLINE
+#endif
+#endif
+
 
 // -----------------------------------------------------------------------------
 // plm (high-level interface) implementation
@@ -1684,35 +1694,45 @@ int plm_buffer_no_start_code(plm_buffer_t *self) {
 	);
 }
 
-int16_t plm_buffer_read_vlc_slow(plm_buffer_t *self, const plm_vlc_t *table, int16_t init_state) {
-	plm_vlc_t state = {init_state, 0};
+int16_t plm_buffer_read_vlc_slow(plm_buffer_t *self, const plm_vlc_t *table) {
+	plm_vlc_t state = {0, 0};
 	do {
 		state = table[state.index + plm_buffer_read(self, 1)];
 	} while (state.index > 0);
 	return state.value;
 }
 
-int16_t plm_buffer_read_vlc(plm_buffer_t *self, const plm_vlc_lut_t *table) {
+PLM_FORCEINLINE int16_t plm_buffer_read_vlc(plm_buffer_t *self, const plm_vlc_lut_t *lut) {
 	int16_t init_state = 0;
 
-	if (((self->length << 3) - self->bit_index) >= 16) {
+	if (((self->length << 3) - self->bit_index) > 32) {
 		const uint8_t *bytes = self->bytes + (self->bit_index >> 3);
 		uint32_t a = bytes[0], b = bytes[1];
-		uint32_t lookahead = (a << 8 | b) >> (16 - table->max_bits - (self->bit_index & 0x7));
+		uint32_t lookahead = (a << 8 | b) >> (16 - lut->max_bits - (self->bit_index & 0x7));
 
-		uint16_t entry = table->entries[lookahead & table->size_mask];
+		uint16_t entry = lut->entries[lookahead & lut->size_mask];
 		uint32_t advance = entry & 0xf;
 		int16_t value = (int16_t)entry >> 4;
 		if (advance > 0) {
 			self->bit_index += advance;
 			return value;
 		} else if (value > 0) {
-			self->bit_index += table->max_bits;
-			init_state = value;
+			uint32_t offset = self->bit_index & 0x7;
+			uint32_t pos = offset + lut->max_bits;
+			const plm_vlc_t *table = lut->table;
+
+			plm_vlc_t state = {value, 0};
+			do {
+				state = table[state.index + (bytes[pos >> 3] >> (7 - (pos & 7)) & 1)];
+				pos += 1;
+			} while (state.index > 0);
+
+			self->bit_index += pos - offset;
+			return state.value;
 		}
 	}
 
-	return plm_buffer_read_vlc_slow(self, table->table, init_state);
+	return plm_buffer_read_vlc_slow(self, lut->table);
 }
 
 void plm_vlc_lut_init(plm_vlc_lut_t *table, uint16_t *entries, size_t sizeof_entries, const plm_vlc_t *vlc) {
@@ -1737,7 +1757,7 @@ void plm_vlc_lut_init(plm_vlc_lut_t *table, uint16_t *entries, size_t sizeof_ent
 			if (state.index <= 0) break;
 		}
 
-		if (state.index > 0 && (int16_t)(state.index << 4) >> 4 == state.index && false) {
+		if (state.index > 0 && (int16_t)(state.index << 4) >> 4 == state.index) {
 			entries[bits] = state.index << 4;
 		} else if (state.index == 0 && (int16_t)(state.value << 4) >> 4 == state.value) {
 			entries[bits] = (uint16_t)(bit_ix + 1) | (uint16_t)(state.value << 4);

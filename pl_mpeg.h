@@ -806,16 +806,27 @@ plm_samples_t *plm_audio_decode(plm_audio_t *self);
 #ifndef PLM_FORCEINLINE
 #if defined(_MSC_VER)
 	#define PLM_FORCEINLINE __forceinline
+	#ifndef PLM_USE_SSE
+		#if (defined(_M_IX86_FP) && _M_IX86_FP >= 2) || defined(_M_X64)
+			#define PLM_USE_SSE
+		#endif
+	#endif
 #elif defined(__GNUC__) || defined(__clang__)
 	#define PLM_FORCEINLINE __attribute__((always_inline))
+	#ifndef PLM_USE_SSE
+		#if defined(__SSE2__ ) || defined(__x86_64__)
+			#define PLM_USE_SSE
+		#endif
+	#endif
 #else
 	#define PLM_FORCEINLINE
 #endif
 #endif
 
-#define PLM_USE_SSE
-#include <emmintrin.h>
-
+#if defined(PLM_USE_SSE)
+	#include <xmmintrin.h>
+	#include <emmintrin.h>
+#endif
 
 // -----------------------------------------------------------------------------
 // plm (high-level interface) implementation

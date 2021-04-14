@@ -1788,7 +1788,7 @@ void plm_vlc_lut_init(plm_vlc_lut_t *table, uint16_t *entries, size_t sizeof_ent
 
 	size_t size_mask = table->size_mask;
 	size_t max_bits = table->max_bits;
-	for (size_t bits = 0; bits < size_mask; bits++) {
+	for (size_t bits = 0; bits <= size_mask; bits++) {
 		plm_vlc_t state = {0, 0};
 
 		size_t bit_ix;

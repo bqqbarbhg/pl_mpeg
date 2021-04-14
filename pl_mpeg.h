@@ -3314,6 +3314,42 @@ PLM_FORCEINLINE void plm_vec8_avg4(uint8_t *dst, const uint8_t *a, const uint8_t
 	_mm_storel_epi64((__m128i*)dst, _mm_packus_epi16(_mm_srli_epi16(lo, 2), zero));
 }
 
+PLM_FORCEINLINE void plm_vec8_copy_int_broadcast(uint8_t *dst, int a)
+{
+	_mm_storel_epi64((__m128i*)dst, _mm_set1_epi8((char)a));
+}
+
+PLM_FORCEINLINE void plm_vec8_copy_int_move(uint8_t *dst, int *a)
+{
+	__m128i zero = _mm_setzero_si128();
+	__m128i lo = _mm_load_si128((const __m128i*)a);
+	__m128i hi = _mm_load_si128((const __m128i*)(a + 4));
+	_mm_storel_epi64((__m128i*)dst, _mm_packus_epi16(_mm_packs_epi32(lo, hi), zero));
+	_mm_store_si128((__m128i*)a, zero);
+	_mm_store_si128((__m128i*)(a + 4), zero);
+}
+
+PLM_FORCEINLINE void plm_vec8_add_int_broadcast(uint8_t *dst, int a)
+{
+	__m128i zero = _mm_setzero_si128();
+	__m128i d = _mm_loadl_epi64((const __m128i*)dst);
+	__m128i v = _mm_set1_epi32(a);
+	__m128i sum = _mm_adds_epi16(_mm_unpacklo_epi8(d, zero), _mm_packs_epi32(v, v));
+	_mm_storel_epi64((__m128i*)dst, _mm_packus_epi16(sum, zero));
+}
+
+PLM_FORCEINLINE void plm_vec8_add_int_move(uint8_t *dst, int *a)
+{
+	__m128i zero = _mm_setzero_si128();
+	__m128i d = _mm_loadl_epi64((const __m128i*)dst);
+	__m128i lo = _mm_load_si128((const __m128i*)a);
+	__m128i hi = _mm_load_si128((const __m128i*)(a + 4));
+	__m128i sum = _mm_adds_epi16(_mm_unpacklo_epi8(d, zero), _mm_packs_epi32(lo, hi));
+	_mm_storel_epi64((__m128i*)dst, _mm_packus_epi16(sum, zero));
+	_mm_store_si128((__m128i*)a, zero);
+	_mm_store_si128((__m128i*)(a + 4), zero);
+}
+
 #define plm_vec16_copy(dst, src) _mm_storeu_si128((__m128i*)(dst), _mm_loadu_si128((const __m128i*)(src)))
 #define plm_vec16_avg2(dst, a, b) _mm_storeu_si128((__m128i*)(dst), _mm_avg_epu8(_mm_loadu_si128((const __m128i*)(a)), _mm_loadu_si128((const __m128i*)(b))))
 
@@ -3350,6 +3386,40 @@ PLM_FORCEINLINE void plm_vec8_avg4(uint8_t *dst, const uint8_t *a, const uint8_t
 	}
 }
 
+PLM_FORCEINLINE void plm_vec8_copy_int_broadcast(uint8_t *dst, int a)
+{
+	for (size_t i = 0; i < 8; i++) {
+		dst[i] = (uint8_t)a;
+	}
+}
+
+PLM_FORCEINLINE void plm_vec8_copy_int_move(uint8_t *dst, int *a)
+{
+	for (size_t i = 0; i < 8; i++) {
+		dst[i] = (uint8_t)plm_clamp(a[i]);
+	}
+	for (size_t i = 0; i < 8; i++) {
+		a[i] = 0;
+	}
+}
+
+PLM_FORCEINLINE void plm_vec8_add_int_broadcast(uint8_t *dst, int a)
+{
+	for (size_t i = 0; i < 8; i++) {
+		dst[i] = (uint8_t)plm_clamp(dst[i] + a);
+	}
+}
+
+PLM_FORCEINLINE void plm_vec8_add_int_move(uint8_t *dst, int *a)
+{
+	for (size_t i = 0; i < 8; i++) {
+		dst[i] = (uint8_t)plm_clamp(dst[i] + a[i]);
+	}
+	for (size_t i = 0; i < 8; i++) {
+		a[i] = 0;
+	}
+}
+
 #define plm_vec16_copy(dst, src) memcpy((dst), (src), 16)
 
 PLM_FORCEINLINE void plm_vec16_avg2(uint8_t *dst, const uint8_t *a, const uint8_t *b)
@@ -3368,17 +3438,72 @@ PLM_FORCEINLINE void plm_vec16_avg4(uint8_t *dst, const uint8_t *a, const uint8_
 
 #endif
 
-#define PLM_BLOCK_SET(DEST, DEST_INDEX, DEST_WIDTH, SOURCE_INDEX, SOURCE_WIDTH, BLOCK_SIZE, OP) do { \
-	int dest_scan = DEST_WIDTH - BLOCK_SIZE; \
-	int source_scan = SOURCE_WIDTH - BLOCK_SIZE; \
-	for (int y = 0; y < BLOCK_SIZE; y++) { \
-		for (int x = 0; x < BLOCK_SIZE; x++) { \
-			DEST[DEST_INDEX] = OP; \
-			SOURCE_INDEX++; DEST_INDEX++; \
-		} \
-		SOURCE_INDEX += source_scan; \
-		DEST_INDEX += dest_scan; \
-	}} while(FALSE)
+#if defined(PLM_USE_SSE) && PLM_USE_SSE
+
+typedef __m128i plm_vint;
+#define plm_vint_width() 4
+
+#define plm_vint_set(val) _mm_set1_epi32(val)
+#define plm_vint_load(ptr) _mm_load_si128((const __m128i*)(ptr))
+#define plm_vint_add(a, b) _mm_add_epi32((a), (b))
+#define plm_vint_addi(a, b) _mm_add_epi32((a), _mm_set1_epi32(b))
+#define plm_vint_sub(a, b) _mm_sub_epi32((a), (b))
+#define plm_vint_div256(a) _mm_srai_epi32(_mm_add_epi32((a), _mm_set1_epi32(128)), 8)
+#define plm_vint_store(dst, a) _mm_storeu_si128((__m128i*)(dst), (a))
+
+PLM_FORCEINLINE plm_vint plm_vint_muli(plm_vint a, int b)
+{
+	__m128i bs = _mm_set1_epi32(b);
+	__m128i lo = _mm_mul_epu32(a, bs);
+	__m128i hi = _mm_mul_epu32(_mm_srli_si128(a, 4), bs);
+	return _mm_unpacklo_epi32(
+		_mm_shuffle_epi32(lo, _MM_SHUFFLE(3,2,2,0)),
+		_mm_shuffle_epi32(hi, _MM_SHUFFLE(3,2,2,0)));
+}
+
+PLM_FORCEINLINE void plm_vint_store_transpose(int *dst, plm_vint a, plm_vint b, plm_vint c, plm_vint d)
+{
+	__m128i t0 = _mm_unpacklo_epi32(a, b);
+	__m128i t1 = _mm_unpacklo_epi32(c, d);
+	__m128i t2 = _mm_unpackhi_epi32(a, b);
+	__m128i t3 = _mm_unpackhi_epi32(c, d);
+	_mm_storeu_si128((__m128i*)(dst + 0*8), _mm_unpacklo_epi64(t0, t1));
+	_mm_storeu_si128((__m128i*)(dst + 1*8), _mm_unpackhi_epi64(t0, t1));
+	_mm_storeu_si128((__m128i*)(dst + 2*8), _mm_unpacklo_epi64(t2, t3));
+	_mm_storeu_si128((__m128i*)(dst + 3*8), _mm_unpackhi_epi64(t2, t3));
+}
+
+PLM_FORCEINLINE plm_vint plm_vint_clamp(plm_vint a)
+{
+	__m128i over_255 = _mm_cmpgt_epi32(_mm_srai_epi32(a, 8), _mm_setzero_si128());
+	__m128i below_0 = _mm_srai_epi32(a, 32);
+	return _mm_andnot_si128(below_0, _mm_or_si128(over_255, a));
+}
+
+#else
+
+typedef int plm_vint;
+#define plm_vint_width() 1
+
+#define plm_vint_set(val) (val)
+#define plm_vint_load(src) *(int*)(src)
+#define plm_vint_add(a, b) ((a) + (b))
+#define plm_vint_addi(a, b) ((a) + (b))
+#define plm_vint_sub(a, b) ((a) - (b))
+#define plm_vint_muli(a, b) ((a) * (b))
+#define plm_vint_div256(a) (((a) + 128) >> 8)
+#define plm_vint_store(dst, a) ((dst) = (a))
+#define plm_vint_clamp(a) plm_clamp(a)
+
+PLM_FORCEINLINE void plm_vint_store_transpose(int *dst, plm_vint a, plm_vint b, plm_vint c, plm_vint d)
+{
+	dst[0] = a;
+	dst[1] = b;
+	dst[2] = c;
+	dst[3] = d;
+}
+
+#endif
 
 void plm_video_process_macroblock(
 	plm_video_t *self, uint8_t *d, uint8_t *s,
@@ -3565,89 +3690,53 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 	}
 
 	int *s = self->block_data;
-	int si = 0;
+
+	d += di;
+
 	if (self->macroblock_intra) {
+
 		// Overwrite (no prediction)
 		if (n == 1) {
 			int clamped = plm_clamp((s[0] + 128) >> 8);
-			PLM_BLOCK_SET(d, di, dw, si, 8, 8, clamped);
 			s[0] = 0;
+
+			for (int y = 0; y < 8; y++) {
+				plm_vec8_copy_int_broadcast(d, clamped);
+				d += dw;
+			}
 		}
 		else {
 			plm_video_idct(s);
-			PLM_BLOCK_SET(d, di, dw, si, 8, 8, plm_clamp(s[si]));
-			memset(self->block_data, 0, sizeof(self->block_data));
+			for (int y = 0; y < 8; y++) {
+				plm_vec8_copy_int_move(d, s);
+				d += dw;
+				s += 8;
+			}
 		}
 	}
 	else {
+
 		// Add data to the predicted macroblock
 		if (n == 1) {
 			int value = (s[0] + 128) >> 8;
-			PLM_BLOCK_SET(d, di, dw, si, 8, 8, plm_clamp(d[di] + value));
 			s[0] = 0;
+
+			for (int y = 0; y < 8; y++) {
+				plm_vec8_add_int_broadcast(d, value);
+				d += dw;
+			}
 		}
 		else {
 			plm_video_idct(s);
-			PLM_BLOCK_SET(d, di, dw, si, 8, 8, plm_clamp(d[di] + s[si]));
-			memset(self->block_data, 0, sizeof(self->block_data));
+
+			for (int y = 0; y < 8; y++) {
+				plm_vec8_add_int_move(d, s);
+				d += dw;
+				s += 8;
+			}
 		}
 	}
 }
-
-#if defined(PLM_USE_SSE) && PLM_USE_SSE
-
-typedef __m128i plm_vint;
-#define plm_vint_width() 4
-
-#define plm_vint_load(ptr) _mm_load_si128((const __m128i*)(ptr))
-#define plm_vint_add(a, b) _mm_add_epi32((a), (b))
-#define plm_vint_addi(a, b) _mm_add_epi32((a), _mm_set1_epi32(b))
-#define plm_vint_sub(a, b) _mm_sub_epi32((a), (b))
-#define plm_vint_div256(a) _mm_srai_epi32(_mm_add_epi32((a), _mm_set1_epi32(128)), 8)
-
-PLM_FORCEINLINE plm_vint plm_vint_muli(plm_vint a, int b)
-{
-	__m128i bs = _mm_set1_epi32(b);
-	__m128i lo = _mm_mul_epu32(a, bs);
-	__m128i hi = _mm_mul_epu32(_mm_srli_si128(a, 4), bs);
-	return _mm_unpacklo_epi32(
-		_mm_shuffle_epi32(lo, _MM_SHUFFLE(3,2,2,0)),
-		_mm_shuffle_epi32(hi, _MM_SHUFFLE(3,2,2,0)));
-}
-
-PLM_FORCEINLINE void plm_vint_store_transpose(int *dst, plm_vint a, plm_vint b, plm_vint c, plm_vint d)
-{
-	__m128i t0 = _mm_unpacklo_epi32(a, b);
-	__m128i t1 = _mm_unpacklo_epi32(c, d);
-	__m128i t2 = _mm_unpackhi_epi32(a, b);
-	__m128i t3 = _mm_unpackhi_epi32(c, d);
-	_mm_storeu_si128((__m128i*)(dst + 0*8), _mm_unpacklo_epi64(t0, t1));
-	_mm_storeu_si128((__m128i*)(dst + 1*8), _mm_unpackhi_epi64(t0, t1));
-	_mm_storeu_si128((__m128i*)(dst + 2*8), _mm_unpacklo_epi64(t2, t3));
-	_mm_storeu_si128((__m128i*)(dst + 3*8), _mm_unpackhi_epi64(t2, t3));
-}
-
-#else
-
-typedef int plm_vint;
-#define plm_vint_width() 1
-
-#define plm_vint_load(src) *(int*)(src)
-#define plm_vint_add(a, b) ((a) + (b))
-#define plm_vint_addi(a, b) ((a) + (b))
-#define plm_vint_sub(a, b) ((a) - (b))
-#define plm_vint_muli(a, b) ((a) * (b))
-#define plm_vint_div256(a) (((a) + 128) >> 8)
-
-PLM_FORCEINLINE void plm_vint_store_transpose(int *dst, plm_vint a, plm_vint b, plm_vint c, plm_vint d)
-{
-	dst[0] = a;
-	dst[1] = b;
-	dst[2] = c;
-	dst[3] = d;
-}
-
-#endif
 
 void plm_video_idct(int *block) {
 	plm_vint

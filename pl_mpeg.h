@@ -3449,7 +3449,6 @@ typedef __m128i plm_vint;
 #define plm_vint_addi(a, b) _mm_add_epi32((a), _mm_set1_epi32(b))
 #define plm_vint_sub(a, b) _mm_sub_epi32((a), (b))
 #define plm_vint_div256(a) _mm_srai_epi32(_mm_add_epi32((a), _mm_set1_epi32(128)), 8)
-#define plm_vint_store(dst, a) _mm_storeu_si128((__m128i*)(dst), (a))
 
 PLM_FORCEINLINE plm_vint plm_vint_muli(plm_vint a, int b)
 {
@@ -3473,13 +3472,6 @@ PLM_FORCEINLINE void plm_vint_store_transpose(int *dst, plm_vint a, plm_vint b, 
 	_mm_storeu_si128((__m128i*)(dst + 3*8), _mm_unpackhi_epi64(t2, t3));
 }
 
-PLM_FORCEINLINE plm_vint plm_vint_clamp(plm_vint a)
-{
-	__m128i over_255 = _mm_cmpgt_epi32(_mm_srai_epi32(a, 8), _mm_setzero_si128());
-	__m128i below_0 = _mm_srai_epi32(a, 32);
-	return _mm_andnot_si128(below_0, _mm_or_si128(over_255, a));
-}
-
 #else
 
 typedef int plm_vint;
@@ -3492,8 +3484,6 @@ typedef int plm_vint;
 #define plm_vint_sub(a, b) ((a) - (b))
 #define plm_vint_muli(a, b) ((a) * (b))
 #define plm_vint_div256(a) (((a) + 128) >> 8)
-#define plm_vint_store(dst, a) ((dst) = (a))
-#define plm_vint_clamp(a) plm_clamp(a)
 
 PLM_FORCEINLINE void plm_vint_store_transpose(int *dst, plm_vint a, plm_vint b, plm_vint c, plm_vint d)
 {

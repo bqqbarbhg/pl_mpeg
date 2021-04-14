@@ -3624,9 +3624,8 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		else {
 			run = coeff >> 8;
 			level = coeff & 0xff;
-			if (plm_buffer_read_bit(self->buffer)) {
-				level = -level;
-			}
+			unsigned bit = (unsigned)plm_buffer_read_bit(self->buffer);
+			level = (int)(((unsigned)level ^ ~(bit - 1)) + bit);
 		}
 
 		n += run;
@@ -3643,9 +3642,10 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 			level += (level < 0 ? -1 : 1);
 		}
 		level = (level * self->quantizer_scale * quant_matrix[de_zig_zagged]) >> 4;
-		if ((level & 1) == 0) {
-			level -= level > 0 ? 1 : -1;
-		}
+
+		// aka: if ((level & 1) == 0) { level -= level > 0 ? 1 : -1; }
+		level -= ((level & 1) - 1) & ((level >> (sizeof(int)*CHAR_BIT-1)) | 1);
+
 		if (level > 2047) {
 			level = 2047;
 		}
